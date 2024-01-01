@@ -66,7 +66,6 @@ def get_graph_feature(x: torch.Tensor, k=30) -> torch.Tensor:
     # return feature  # (batch_size, 2*num_dims, num_points, k)
     return feature
 
-    return feature  # (batch_size, 2*num_dims, num_points, k)
 
 class LDGCNNSegmentor(nn.Module):
     """
