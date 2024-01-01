@@ -68,88 +68,82 @@ def get_graph_feature(x: torch.Tensor, k=30) -> torch.Tensor:
 
     return feature  # (batch_size, 2*num_dims, num_points, k)
 
-
-class LDGCNN(nn.Module):
+class LDGCNNSegmentor(nn.Module):
     """
     Attributes:
         ...
     """
-    def __init__(self, k, emb_dims):
+    def __init__(self, out_channels: int, k=30, aggr='max'):
         """
 
         Args:
+            num_points
+            out_channels:
             k:
+            aggr:
         """
-        super(LDGCNN, self).__init__()
+        super().__init__()
 
         self.k = k
 
-        self.bn1 = nn.BatchNorm2d(64)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.bn3 = nn.BatchNorm2d(64)
-        self.bn4 = nn.BatchNorm2d(64)
-        self.bn5 = nn.BatchNorm2d(64)
-        self.bn6 = nn.BatchNorm1d(emb_dims)
-        self.bn7 = nn.BatchNorm1d(512)
-        self.bn8 = nn.BatchNorm1d(256)
+        # Extracting global features
+        self.edge_conv1 = EdgeConv(MLP([2 * 6, 64, 64]), aggr)
+        self.edge_conv2 = EdgeConv(MLP([2 * 64, 64, 64]), aggr)
+        self.edge_conv3 = EdgeConv(MLP([2 * 64, 64, 64]), aggr)
+        self.edge_conv4 = EdgeConv(MLP([2 * 64, 128, 128]), aggr)
 
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(18, 64, kernel_size=1, bias=False),
-            self.bn1,
-            nn.LeakyReLU(negative_slope=0.2))
-        self.conv2 = nn.Sequential(nn.Conv2d(64, 64, kernel_size=1, bias=False),
-                                   self.bn2,
-                                   nn.LeakyReLU(negative_slope=0.2))
-        self.conv3 = nn.Sequential(nn.Conv2d(64 * 2, 64, kernel_size=1, bias=False),
-                                   self.bn3,
-                                   nn.LeakyReLU(negative_slope=0.2))
-        self.conv4 = nn.Sequential(nn.Conv2d(64, 64, kernel_size=1, bias=False),
-                                   self.bn4,
-                                   nn.LeakyReLU(negative_slope=0.2))
-        self.conv5 = nn.Sequential(nn.Conv2d(64 * 2, 64, kernel_size=1, bias=False),
-                                   self.bn5,
-                                   nn.LeakyReLU(negative_slope=0.2))
-        self.conv6 = nn.Sequential(nn.Conv1d(192, args.emb_dims, kernel_size=1, bias=False),
-                                   self.bn6,
-                                   nn.LeakyReLU(negative_slope=0.2))
-        self.conv7 = nn.Sequential(nn.Conv1d(1216, 512, kernel_size=1, bias=False),
-                                   self.bn7,
-                                   nn.LeakyReLU(negative_slope=0.2))
-        self.conv8 = nn.Sequential(nn.Conv1d(512, 256, kernel_size=1, bias=False),
-                                   self.bn8,
-                                   nn.LeakyReLU(negative_slope=0.2))
-        self.dp1 = nn.Dropout()
-        self.conv9 = nn.Conv1d(256, 13, kernel_size=1, bias=False)
+        self.fe_mlp = MLP([128, 1024, 1024])
 
-    def forward(self, x):
-        batch_size = x.size(0)
-        num_points = x.size(2)
+        # MLP for prediction segmentation scores
+        self.mlp = MLP([1347, 256, 256, 128, out_channels], dropout=0.5, norm=None)
 
-        x = get_graph_feature(x, k=self.k, dim9=True)  # (batch_size, 9, num_points) -> (batch_size, 9*2, num_points, k)
-        x = self.conv1(x)  # (batch_size, 9*2, num_points, k) -> (batch_size, 64, num_points, k)
-        x = self.conv2(x)  # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
-        x1 = x.max(dim=-1, keepdim=False)[0]  # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
+    def forward(self, data):
+        """
 
-        x = get_graph_feature(x1, k=self.k)  # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
-        x = self.conv3(x)  # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
-        x = self.conv4(x)  # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
-        x2 = x.max(dim=-1, keepdim=False)[0]  # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
+        Args:
+            data:
 
-        x = get_graph_feature(x2, k=self.k)  # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
-        x = self.conv5(x)  # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
-        x3 = x.max(dim=-1, keepdim=False)[0]  # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
+        Returns:
 
-        x = torch.cat((x1, x2, x3), dim=1)  # (batch_size, 64*3, num_points)
+        """
+        x, pos, batch = data.x, data.pos, data.batch
+        x = torch.unsqueeze(x, dim=-2)
+        x0 = torch.cat([x, pos], dim=-1)
 
-        x = self.conv6(x)  # (batch_size, 64*3, num_points) -> (batch_size, emb_dims, num_points)
-        x = x.max(dim=-1, keepdim=True)[0]  # (batch_size, emb_dims, num_points) -> (batch_size, emb_dims, 1)
+        num_points = x0.size(2)
 
-        x = x.repeat(1, 1, num_points)  # (batch_size, 1024, num_points)
-        x = torch.cat((x, x1, x2, x3), dim=1)  # (batch_size, 1024+64*3, num_points)
+        x1 = get_graph_feature(x0, k=self.k)
+        x1 = self.edge_conv1(x1, batch)
 
-        x = self.conv7(x)  # (batch_size, 1024+64*3, num_points) -> (batch_size, 512, num_points)
-        x = self.conv8(x)  # (batch_size, 512, num_points) -> (batch_size, 256, num_points)
-        x = self.dp1(x)
-        x = self.conv9(x)  # (batch_size, 256, num_points) -> (batch_size, 13, num_points)
+        x2 = get_graph_feature(x1, k=self.k)
+        # x0 will be (batch_size, num_dims, 1, num_points)
+        # it is needed for concatenation with knn result
+        x0 = torch.unsqueeze(x0, dim=-2)
+        link_1 = x0 + x2
+        x2 = self.edge_conv2(link_1, batch)
 
-        return x
+        # input point cloud + result of first EdgeConv + result of second EdgeConv
+        x3 = get_graph_feature(x2, k=self.k)
+        x2 = torch.unsqueeze(x2, dim=-2)
+        link_2 = x0 + x2 + x3
+        x3 = self.edge_conv3(link_2, batch)
+
+        # input point cloud + result of first EdgeConv + result of second EdgeConv
+        x4 = get_graph_feature(x3, k=self.k)
+        x3 = torch.unsqueeze(x3, dim=-2)
+        link_3 = x0 + x2 + x3 + x4
+        x4 = self.edge_conv4(link_3, batch)
+
+        link_4 = torch.cat([x0, x1, x2, x3, x4], dim=-1)
+
+        x5 = self.fe_mlp(link_4)
+        # x6 is (batch_size, 1024)
+        # x6 is a global feature tensor
+        x6, _ = torch.max(x5, dim=1)
+        x6_repeated = x6.repeat(1, 1, num_points)
+
+        # tensor is (batch_size)
+        local_global_features = torch.cat([link_4, x6_repeated], axis=1)
+
+        out = self.mlp(local_global_features)
+        return nn.functional.log_softmax(out, dim=1)
