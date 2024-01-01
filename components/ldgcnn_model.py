@@ -1,32 +1,70 @@
+import torch
 import torch.nn as nn
+import torch_geometric.transforms as T
+from torch_geometric.datasets import ShapeNet
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import MLP
+from torch_geometric.nn import EdgeConv
+from torch_geometric.utils import scatter
 
 
-def get_graph_feature(x, k=20, idx=None, dim9=False):
+# TODO: Possibly can be replaced with pool.KNNIndex (https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.pool.KNNIndex.html#torch_geometric.nn.pool.KNNIndex)
+def knn(x: torch.Tensor, k: int):
+    """Performs K-NN operation on an input tensor.
+
+    Args:
+        x: Input tensor.
+        k: Number of nearest neighbours.
+
+    Returns:
+        Tensor size (x.size(0), x.size(2), k) - (batch_size, num_points, k)
+    """
+    inner = -2 * torch.matmul(x.transpose(2, 1), x)
+    xx = torch.sum(x ** 2, dim=1, keepdim=True)
+    pairwise_distance = -xx - inner - xx.transpose(2, 1)
+
+    idx = pairwise_distance.topk(k=k, dim=-1)[1]  # (batch_size, num_points, k)
+    return idx
+
+
+def get_graph_feature(x: torch.Tensor, k=30) -> torch.Tensor:
+    """Applies K-NN to an input and gets each node's features.
+
+    Args:
+        x: Input tensor size of (batch_size, num_dims, num_points) to perform operations on.
+        k: Number of nearest neighbours for forming graph.
+
+    Returns:
+        Tensor size of (batch_size, num_points, k, num_dims)
+         with features for each found nearest neighbour.
+    """
     batch_size = x.size(0)
+    num_dims = x.size(1)
     num_points = x.size(2)
-    x = x.view(batch_size, -1, num_points)
-    if idx is None:
-        if not dim9:
-            idx = knn(x, k=k)  # (batch_size, num_points, k)
-        else:
-            idx = knn(x[:, 6:], k=k)
+    # x = x.view(batch_size, -1, num_points)
+    # idx is (batch_size, num_points, k)
+    idx = knn(x, k=k)
     device = torch.device('cuda')
 
+    # idx_base is (batch_size, 1, 1)
+    # each element contains num_points value multiplication by index of first dim,
+    # e.g. [ [ [0] ], [ [2048] ], ...]
     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
 
+    # add to each element of idx row wise element of idx_base
     idx = idx + idx_base
 
     idx = idx.view(-1)
-
-    _, num_dims, _ = x.size()
-
-    x = x.transpose(2,
-                    1).contiguous()  # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
+    # x will be (batch_size, num_points, num_dims)
+    x = x.transpose(2, 1).contiguous()
     feature = x.view(batch_size * num_points, -1)[idx, :]
     feature = feature.view(batch_size, num_points, k, num_dims)
-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
-
-    feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2).contiguous()
+    # x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
+    #
+    # feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2).contiguous()
+    #
+    # return feature  # (batch_size, 2*num_dims, num_points, k)
+    return feature
 
     return feature  # (batch_size, 2*num_dims, num_points, k)
 
