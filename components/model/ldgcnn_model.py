@@ -6,143 +6,113 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.nn import MLP
 from torch_geometric.nn import EdgeConv
 from torch_geometric.utils import scatter
+from torch_cluster import knn_graph
+from torch_geometric.data.batch import DataBatch
 
 
-# TODO: Possibly can be replaced with pool.KNNIndex (https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.pool.KNNIndex.html#torch_geometric.nn.pool.KNNIndex)
-def knn(x: torch.Tensor, k: int):
-    """Performs K-NN operation on an input tensor.
+def apply_knn(x: torch.Tensor, batch: torch.Tensor, k=30) -> torch.Tensor:
+    """Applies knn for making graph.
 
     Args:
-        x: Input tensor.
-        k: Number of nearest neighbours.
+        x: Node feature matrix.
+        batch: Batch vector, which assigns each node to a specific example.
+        k: The number of neighbors.
 
     Returns:
-        Tensor size (x.size(0), x.size(2), k) - (batch_size, num_points, k)
+        Tensor with graph edges for EdgeConv.
     """
-    inner = -2 * torch.matmul(x.transpose(2, 1), x)
-    xx = torch.sum(x ** 2, dim=1, keepdim=True)
-    pairwise_distance = -xx - inner - xx.transpose(2, 1)
-
-    idx = pairwise_distance.topk(k=k, dim=-1)[1]  # (batch_size, num_points, k)
+    idx = knn_graph(x, k=k, batch=batch)
     return idx
 
 
-def get_graph_feature(x: torch.Tensor, k=30) -> torch.Tensor:
-    """Applies K-NN to an input and gets each node's features.
-
-    Args:
-        x: Input tensor size of (batch_size, num_dims, num_points) to perform operations on.
-        k: Number of nearest neighbours for forming graph.
-
-    Returns:
-        Tensor size of (batch_size, num_points, k, num_dims)
-         with features for each found nearest neighbour.
-    """
-    batch_size = x.size(0)
-    num_dims = x.size(1)
-    num_points = x.size(2)
-    # x = x.view(batch_size, -1, num_points)
-    # idx is (batch_size, num_points, k)
-    idx = knn(x, k=k)
-    device = torch.device('cuda')
-
-    # idx_base is (batch_size, 1, 1)
-    # each element contains num_points value multiplication by index of first dim,
-    # e.g. [ [ [0] ], [ [2048] ], ...]
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
-
-    # add to each element of idx row wise element of idx_base
-    idx = idx + idx_base
-
-    idx = idx.view(-1)
-    # x will be (batch_size, num_points, num_dims)
-    x = x.transpose(2, 1).contiguous()
-    feature = x.view(batch_size * num_points, -1)[idx, :]
-    feature = feature.view(batch_size, num_points, k, num_dims)
-    # x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
-    #
-    # feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2).contiguous()
-    #
-    # return feature  # (batch_size, 2*num_dims, num_points, k)
-    return feature
-
-
 class LDGCNNSegmentor(nn.Module):
-    """
+    """Class with implementation of segmentation part of LDGCNN.
+
     Attributes:
-        ...
+        k: Number of nearest neighbours for creating graph using KNN.
+        edge_conv1: First Edge convolution layer. It uses only model input.
+        edge_conv2: Second Edge convolution layer.
+         It uses model input + edge_conv1 result (in_channels + 64 features).
+        edge_conv3: Third Edge convolution layer.
+         It uses model input + edge_conv1 result + edge_conv2 result
+         (in_channels + 64 + 64 features).
+        edge_conv4: Fourth Edge convolution layer.
+         It uses model input + edge_conv1 result + edge_conv2 result + edge_conv3 result
+         (in_channels + 64 + 64 + 64 features).
+        fe_mlp: MLP that uses extracted local features for creating global features vector.
+        mlp: MLP that uses concatenated local and global features vectors
+         for predicting segmentation scores.
     """
-    def __init__(self, out_channels: int, k=30, aggr='max'):
-        """
+    def __init__(self, in_channels: int, out_channels: int, k=30, aggr='max'):
+        """Creates an instance of the class.
 
         Args:
-            num_points
-            out_channels:
-            k:
-            aggr:
+            out_channels: Number of output segmentation classes.
+            k: Number of nearest neighbours for creating graph using KNN.
+            aggr: Aggregation function for using in EdgeConv.
         """
         super().__init__()
 
         self.k = k
 
         # Extracting global features
-        self.edge_conv1 = EdgeConv(MLP([2 * 6, 64, 64]), aggr)
-        self.edge_conv2 = EdgeConv(MLP([2 * 64, 64, 64]), aggr)
-        self.edge_conv3 = EdgeConv(MLP([2 * 64, 64, 64]), aggr)
-        self.edge_conv4 = EdgeConv(MLP([2 * 64, 128, 128]), aggr)
+        self.edge_conv1 = EdgeConv(MLP([2 * in_channels, 64, 64]), aggr)
+        self.edge_conv2 = EdgeConv(MLP([2 * (64 + in_channels), 64, 64]), aggr)
+        self.edge_conv3 = EdgeConv(MLP([2 * (64 + 64 + in_channels), 64, 64]), aggr)
+        self.edge_conv4 = EdgeConv(MLP([2 * (64 + 64 + 64 + in_channels), 128, 128]), aggr)
 
-        self.fe_mlp = MLP([128, 1024, 1024])
+        self.fe_mlp = MLP([in_channels + 64 + 64 + 64 + 128, 1024, 1024])
 
         # MLP for prediction segmentation scores
-        self.mlp = MLP([1347, 256, 256, 128, out_channels], dropout=0.5, norm=None)
+        self.mlp = MLP([in_channels + 64 + 64 + 64 + 128 + 1024, 256, 256, 128, out_channels],
+                       dropout=0.5,
+                       norm=None)
 
-    def forward(self, data):
-        """
+    def forward(self, data: DataBatch) -> torch.Tensor:
+        """Performs forward propagation.
 
         Args:
-            data:
+            data: DataBatch.
 
         Returns:
-
+            Model output for desired input as a torch.Tensor.
         """
         x, pos, batch = data.x, data.pos, data.batch
-        x = torch.unsqueeze(x, dim=-2)
+        num_points = batch.size(0)
+        # x0 is (num_points, in_channels)
         x0 = torch.cat([x, pos], dim=-1)
 
-        num_points = x0.size(2)
+        edge_index = apply_knn(x0, batch, k=self.k)
+        # (num_points, in_channels) -> (num_points, 64)
+        x1 = self.edge_conv1(x0, edge_index)
 
-        x1 = get_graph_feature(x0, k=self.k)
-        x1 = self.edge_conv1(x1, batch)
+        edge_index = apply_knn(x1, batch, k=self.k)
+        link_1 = torch.cat([x0, x1], dim=1)
+        # (num_points, in_channels + 64) -> (num_points, 64)
+        x2 = self.edge_conv2(link_1, edge_index)
 
-        x2 = get_graph_feature(x1, k=self.k)
-        # x0 will be (batch_size, num_dims, 1, num_points)
-        # it is needed for concatenation with knn result
-        x0 = torch.unsqueeze(x0, dim=-2)
-        link_1 = x0 + x2
-        x2 = self.edge_conv2(link_1, batch)
+        edge_index = apply_knn(x2, batch, k=self.k)
+        link_2 = torch.cat([x0, x1, x2], dim=1)
+        # (num_points, in_channels + 64 + 64) -> (num_points, 64)
+        x3 = self.edge_conv3(link_2, edge_index)
 
-        # input point cloud + result of first EdgeConv + result of second EdgeConv
-        x3 = get_graph_feature(x2, k=self.k)
-        x2 = torch.unsqueeze(x2, dim=-2)
-        link_2 = x0 + x2 + x3
-        x3 = self.edge_conv3(link_2, batch)
-
-        # input point cloud + result of first EdgeConv + result of second EdgeConv
-        x4 = get_graph_feature(x3, k=self.k)
-        x3 = torch.unsqueeze(x3, dim=-2)
-        link_3 = x0 + x2 + x3 + x4
-        x4 = self.edge_conv4(link_3, batch)
+        edge_index = apply_knn(x2, batch, k=self.k)
+        link_3 = torch.cat([x0, x1, x2, x3], dim=1)
+        # (num_points, in_channels + 64 + 64 + 64) -> (num_points, 128)
+        x4 = self.edge_conv4(link_3, edge_index)
 
         link_4 = torch.cat([x0, x1, x2, x3, x4], dim=-1)
-
+        # (num_points, in_channels + 64 + 64 + 64 + 128) -> (num_points, 1024)
         x5 = self.fe_mlp(link_4)
-        # x6 is (batch_size, 1024)
+
         # x6 is a global feature tensor
-        x6, _ = torch.max(x5, dim=1)
-        x6_repeated = x6.repeat(1, 1, num_points)
-
-        # tensor is (batch_size)
-        local_global_features = torch.cat([link_4, x6_repeated], axis=1)
-
+        # (num_points, 1024) -> (1, 1024)
+        global_features, _ = torch.max(x5, dim=0, keepdim=True)
+        # (1, 1024) -> (num_points, 1024)
+        global_features_repeated = global_features.repeat(num_points, 1)
+        # (num_points, in_channels + 64 + 64 + 64 + 128) + (num_points, 1024)
+        # -> (num_points, in_channels + 64 + 64 + 64 + 128 + 1024)
+        local_global_features = torch.cat([link_4, global_features_repeated], axis=1)
+        # (num_points, in_channels + 64 + 64 + 64 + 128 + 1024) -> (num_points, out_channels)
         out = self.mlp(local_global_features)
         return nn.functional.log_softmax(out, dim=1)
