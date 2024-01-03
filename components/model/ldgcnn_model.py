@@ -7,7 +7,6 @@ from torch_geometric.nn import MLP
 from torch_geometric.nn import EdgeConv
 from torch_geometric.utils import scatter
 from torch_cluster import knn_graph
-from torch_geometric.data.batch import DataBatch
 
 
 def apply_knn(x: torch.Tensor, batch: torch.Tensor, k=30) -> torch.Tensor:
@@ -68,7 +67,7 @@ class LDGCNNSegmentor(nn.Module):
                        dropout=0.5,
                        norm=None)
 
-    def forward(self, data: DataBatch) -> torch.Tensor:
+    def forward(self, data) -> torch.Tensor:
         """Performs forward propagation.
 
         Args:
