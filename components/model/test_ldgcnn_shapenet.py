@@ -12,7 +12,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.nn import MLP, DynamicEdgeConv
 from torch_geometric.utils import scatter
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 if ROOT_DIR not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
