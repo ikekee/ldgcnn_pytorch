@@ -102,7 +102,7 @@ def main():
 
     for epoch in range(1, 31):
         train(train_loader, model, device, optimizer)
-        iou = test(test_loader)
+        iou = test(test_loader, model, device)
         print(f'Epoch: {epoch:02d}, Test IoU: {iou:.4f}')
 
 
