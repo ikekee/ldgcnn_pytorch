@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 import sys
 
@@ -77,7 +78,7 @@ def test(loader: DataLoader,
     return float(mean_iou.mean())  # Global IoU.
 
 
-def main():
+def main(epochs_num: int):
     category = 'Airplane'  # Pass in `None` to train on all categories.
     path = "data/ShapeNet"
     transform = T.Compose([
@@ -100,11 +101,21 @@ def main():
     model = LDGCNNSegmentor(in_channels=6, out_channels=train_dataset.num_classes, k=30).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    for epoch in range(1, 31):
+    for epoch in range(1, epochs_num + 1):
         train(train_loader, model, device, optimizer)
         iou = test(test_loader, model, device)
         print(f'Epoch: {epoch:02d}, Test IoU: {iou:.4f}')
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '-e',
+        '--epochs_num',
+        type=int,
+        help='Number of epochs to train model on.',
+        default=30
+    )
+
+    args = parser.parse_args()
+    main(args.epochs_num)
